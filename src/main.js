@@ -10,6 +10,38 @@ const SIZES = {
   L: { width: 360, height: 360 },
 };
 
+// ── Internationalization ──
+const i18n = {
+  en: {
+    size: "Size",
+    small: "Small (S)",
+    medium: "Medium (M)",
+    large: "Large (L)",
+    miniMode: "Mini Mode",
+    exitMiniMode: "Exit Mini Mode",
+    sleep: "Sleep (Do Not Disturb)",
+    wake: "Wake Clawd",
+    startOnLogin: "Start on Login",
+    language: "Language",
+    quit: "Quit",
+  },
+  zh: {
+    size: "大小",
+    small: "小 (S)",
+    medium: "中 (M)",
+    large: "大 (L)",
+    miniMode: "极简模式",
+    exitMiniMode: "退出极简模式",
+    sleep: "休眠（免打扰）",
+    wake: "唤醒 Clawd",
+    startOnLogin: "开机自启",
+    language: "语言",
+    quit: "退出",
+  },
+};
+let lang = "en";
+function t(key) { return (i18n[lang] || i18n.en)[key] || key; }
+
 // ── Position persistence ──
 const PREFS_PATH = path.join(app.getPath("userData"), "clawd-prefs.json");
 
@@ -26,7 +58,7 @@ function savePrefs() {
   const { x, y } = win.getBounds();
   const data = {
     x, y, size: currentSize,
-    miniMode, preMiniX, preMiniY,
+    miniMode, preMiniX, preMiniY, lang,
   };
   try { fs.writeFileSync(PREFS_PATH, JSON.stringify(data)); } catch {}
 }
@@ -125,9 +157,11 @@ let currentHitBox = HIT_BOXES.default;
 
 let win;
 let tray = null;
+let contextMenuOwner = null;
 let currentSize = "S";
 let contextMenu;
 let doNotDisturb = false;
+let isQuitting = false;
 
 function sendToRenderer(channel, ...args) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
@@ -143,6 +177,7 @@ let mainTickTimer = null;
 let moveTopTimer = null;
 let mouseOverPet = false;
 let dragLocked = false;
+let menuOpen = false;
 let idlePaused = false;
 let idleWasActive = false;
 let lastEyeDx = 0, lastEyeDy = 0;
@@ -343,7 +378,7 @@ function startMainTick() {
     }
 
     // ── Mini mode peek hover ──
-    if (miniMode && !miniTransitioning && !dragLocked) {
+    if (miniMode && !miniTransitioning && !dragLocked && !menuOpen) {
       const canPeek = currentState === "mini-idle" || currentState === "mini-peek";
       if (!isAnimating && canPeek) {
         if (mouseOverPet && currentState !== "mini-peek") {
@@ -684,7 +719,9 @@ function startHttpServer() {
             const sid = session_id || "default";
             if (svg) {
               // Direct SVG override (test-demo.sh, manual curl) — bypass session logic
-              setState(state, svg);
+              // Sanitize: strip path separators to prevent directory traversal
+              const safeSvg = path.basename(svg);
+              setState(state, safeSvg);
             } else {
               updateSession(sid, state, event);
             }
@@ -730,12 +767,12 @@ function buildTrayMenu() {
   if (!tray) return;
   const menu = Menu.buildFromTemplate([
     {
-      label: doNotDisturb ? "唤醒 Clawd" : "休眠（免打扰）",
+      label: doNotDisturb ? t("wake") : t("sleep"),
       click: () => doNotDisturb ? disableDoNotDisturb() : enableDoNotDisturb(),
     },
     { type: "separator" },
     {
-      label: "开机自启",
+      label: t("startOnLogin"),
       type: "checkbox",
       checked: app.getLoginItemSettings().openAtLogin,
       click: (menuItem) => {
@@ -743,15 +780,93 @@ function buildTrayMenu() {
       },
     },
     { type: "separator" },
-    { label: "退出", click: () => app.quit() },
+    {
+      label: t("language"),
+      submenu: [
+        { label: "English", type: "radio", checked: lang === "en", click: () => setLanguage("en") },
+        { label: "中文", type: "radio", checked: lang === "zh", click: () => setLanguage("zh") },
+      ],
+    },
+    { type: "separator" },
+    { label: t("quit"), click: () => requestAppQuit() },
   ]);
   tray.setContextMenu(menu);
 }
 
 // ── Window creation ──
+function requestAppQuit() {
+  isQuitting = true;
+  app.quit();
+}
+
+function ensureContextMenuOwner() {
+  if (contextMenuOwner && !contextMenuOwner.isDestroyed()) return contextMenuOwner;
+  if (!win || win.isDestroyed()) return null;
+
+  contextMenuOwner = new BrowserWindow({
+    parent: win,
+    x: 0,
+    y: 0,
+    width: 1,
+    height: 1,
+    show: false,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    resizable: false,
+    skipTaskbar: true,
+    focusable: true,
+    closable: false,
+    minimizable: false,
+    maximizable: false,
+    hasShadow: false,
+  });
+
+  contextMenuOwner.on("close", (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      contextMenuOwner.hide();
+    }
+  });
+
+  contextMenuOwner.on("closed", () => {
+    contextMenuOwner = null;
+  });
+
+  return contextMenuOwner;
+}
+
+function showPetContextMenu() {
+  if (!win || win.isDestroyed()) return;
+  if (menuOpen) return;
+
+  buildContextMenu();
+  const owner = ensureContextMenuOwner();
+  if (!owner) return;
+
+  const cursor = screen.getCursorScreenPoint();
+  owner.setBounds({ x: cursor.x, y: cursor.y, width: 1, height: 1 });
+  owner.show();
+  owner.focus();
+
+  menuOpen = true;
+  contextMenu.popup({
+    window: owner,
+    callback: () => {
+      menuOpen = false;
+      if (owner && !owner.isDestroyed()) owner.hide();
+      if (win && !win.isDestroyed()) {
+        win.showInactive();
+        win.moveTop();
+      }
+    },
+  });
+}
+
 function createWindow() {
   const prefs = loadPrefs();
   if (prefs && SIZES[prefs.size]) currentSize = prefs.size;
+  if (prefs && i18n[prefs.lang]) lang = prefs.lang;
   const size = SIZES[currentSize];
 
   // Restore saved position, or default to bottom-right of primary display
@@ -797,10 +912,9 @@ function createWindow() {
 
   buildContextMenu();
   createTray();
+  ensureContextMenuOwner();
 
-  ipcMain.on("show-context-menu", () => {
-    contextMenu.popup({ window: win });
-  });
+  ipcMain.on("show-context-menu", showPetContextMenu);
 
   ipcMain.on("move-window-by", (event, dx, dy) => {
     if (miniMode) return;
@@ -1135,27 +1249,43 @@ function enterMiniViaMenu() {
 function buildContextMenu() {
   const template = [
     {
-      label: "大小",
+      label: t("size"),
       submenu: [
-        { label: "小 (S)", type: "radio", checked: currentSize === "S", click: () => resizeWindow("S") },
-        { label: "中 (M)", type: "radio", checked: currentSize === "M", click: () => resizeWindow("M") },
-        { label: "大 (L)", type: "radio", checked: currentSize === "L", click: () => resizeWindow("L") },
+        { label: t("small"), type: "radio", checked: currentSize === "S", click: () => resizeWindow("S") },
+        { label: t("medium"), type: "radio", checked: currentSize === "M", click: () => resizeWindow("M") },
+        { label: t("large"), type: "radio", checked: currentSize === "L", click: () => resizeWindow("L") },
       ],
     },
     { type: "separator" },
     {
-      label: miniMode ? "退出极简模式" : "极简模式",
+      label: miniMode ? t("exitMiniMode") : t("miniMode"),
+      enabled: !miniTransitioning,
       click: () => miniMode ? exitMiniMode() : enterMiniViaMenu(),
     },
     { type: "separator" },
     {
-      label: doNotDisturb ? "唤醒 Clawd" : "休眠（免打扰）",
+      label: doNotDisturb ? t("wake") : t("sleep"),
       click: () => doNotDisturb ? disableDoNotDisturb() : enableDoNotDisturb(),
     },
     { type: "separator" },
-    { label: "退出", click: () => app.quit() },
+    {
+      label: t("language"),
+      submenu: [
+        { label: "English", type: "radio", checked: lang === "en", click: () => setLanguage("en") },
+        { label: "中文", type: "radio", checked: lang === "zh", click: () => setLanguage("zh") },
+      ],
+    },
+    { type: "separator" },
+    { label: t("quit"), click: () => requestAppQuit() },
   ];
   contextMenu = Menu.buildFromTemplate(template);
+}
+
+function setLanguage(newLang) {
+  lang = newLang;
+  buildContextMenu();
+  buildTrayMenu();
+  savePrefs();
 }
 
 function resizeWindow(sizeKey) {
@@ -1165,10 +1295,12 @@ function resizeWindow(sizeKey) {
     const { y } = win.getBounds();
     const wa = getNearestWorkArea(currentMiniX + size.width / 2, y + size.height / 2);
     currentMiniX = wa.x + wa.width - Math.round(size.width * (1 - MINI_OFFSET_RATIO));
-    win.setBounds({ x: currentMiniX, y, width: size.width, height: size.height });
+    const clampedY = Math.max(wa.y, Math.min(y, wa.y + wa.height - size.height));
+    win.setBounds({ x: currentMiniX, y: clampedY, width: size.width, height: size.height });
   } else {
     const { x, y } = win.getBounds();
-    win.setBounds({ x, y, width: size.width, height: size.height });
+    const clamped = clampToScreen(x, y, size.width, size.height);
+    win.setBounds({ ...clamped, width: size.width, height: size.height });
   }
   buildContextMenu();
   savePrefs();
@@ -1187,6 +1319,7 @@ if (!gotTheLock) {
   app.whenReady().then(createWindow);
 
   app.on("before-quit", () => {
+    isQuitting = true;
     savePrefs();
     if (pendingTimer) clearTimeout(pendingTimer);
     if (autoReturnTimer) clearTimeout(autoReturnTimer);
@@ -1201,5 +1334,8 @@ if (!gotTheLock) {
     if (httpServer) httpServer.close();
   });
 
-  app.on("window-all-closed", () => app.quit());
+  app.on("window-all-closed", () => {
+    if (!isQuitting) return;
+    app.quit();
+  });
 }
