@@ -765,10 +765,12 @@ function createWindow() {
   });
 
   // ── Periodic alwaysOnTop refresh (Windows DWM can drop z-order) ──
+  // Use moveTop() instead of setAlwaysOnTop(false→true) to avoid a brief
+  // gap where the window loses TOPMOST status — that gap lets other windows
+  // slip above Clawd during window switches.
   setInterval(() => {
     if (win && !win.isDestroyed()) {
-      win.setAlwaysOnTop(false);
-      win.setAlwaysOnTop(true);
+      win.moveTop();
     }
   }, 30000); // every 30s
 
